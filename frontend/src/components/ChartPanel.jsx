@@ -22,6 +22,47 @@ const fmtVol = n => {
   return Number(n).toFixed(0);
 };
 
+// ── SMC Timeframe: resample bars to a higher target timeframe ─────
+// If current bars are coarser than target, returns bars as-is.
+function resampleBars(bars, targetMinutes) {
+  if (!bars || !bars.length || !targetMinutes) return bars || [];
+  const ms = targetMinutes * 60 * 1000;
+  const out = [];
+  let bucket = null;
+  for (let i = 0; i < bars.length; i++) {
+    const b = bars[i];
+    const bStart = Math.floor(b.timestamp / ms) * ms;
+    if (!bucket || bucket.timestamp !== bStart) {
+      if (bucket) out.push(bucket);
+      bucket = {
+        timestamp: bStart,
+        open:  b.open,
+        high:  b.high,
+        low:   b.low,
+        close: b.close,
+        volume: b.volume || 0,
+      };
+    } else {
+      bucket.high   = Math.max(bucket.high, b.high);
+      bucket.low    = Math.min(bucket.low,  b.low);
+      bucket.close  = b.close;
+      bucket.volume = (bucket.volume || 0) + (b.volume || 0);
+    }
+  }
+  if (bucket) out.push(bucket);
+  return out;
+}
+
+// SMC Timeframe options (label → minutes; null = AUTO/current chart TF)
+const SMC_TF_OPTIONS = [
+  { label: 'AUTO', minutes: null },
+  { label: '1D',   minutes: 1440 },
+  { label: '4H',   minutes: 240  },
+  { label: '1H',   minutes: 60   },
+  { label: '5M',   minutes: 5    },
+  { label: '3M',   minutes: 3    },
+];
+
 // ── SMC Auto Mark: compute FVG / Liquidity / Order Blocks ─────────
 function computeSMCData(bars) {
   const n = bars.length;
@@ -308,6 +349,10 @@ const ChartPanel = ({
   // Trade Signal (Parity Scanner) price lines
   const tradeSignalLinesRef = useRef([]);
   const [smcActive, setSmcActive] = useState(true);
+  const [smcTimeframe, setSmcTimeframe] = useState('AUTO');
+  const [smcTfOpen, setSmcTfOpen] = useState(false);
+  const smcTfDropdownRef = useRef(null);
+  const smcTfBtnRef = useRef(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [selectMode, setSelectMode] = useState(null);
   const [showGannLines, setShowGannLines] = useState(true);
@@ -1200,12 +1245,16 @@ const ChartPanel = ({
     return () => { if (vpAnimRef.current) cancelAnimationFrame(vpAnimRef.current); };
   }, [vpActive, drawVPCanvas]);
 
-  // ── SMC: compute when bars change ─────────────────────────────
+  // ── SMC: compute when bars or selected SMC timeframe change ───
   useEffect(() => {
     smcDataRef.current = null;
     if (!stockData?.bars?.length) return;
-    smcDataRef.current = computeSMCData(stockData.bars);
-  }, [stockData]);
+    const opt = SMC_TF_OPTIONS.find(o => o.label === smcTimeframe);
+    const bars = (opt && opt.minutes)
+      ? resampleBars(stockData.bars, opt.minutes)
+      : stockData.bars;
+    smcDataRef.current = computeSMCData(bars);
+  }, [stockData, smcTimeframe]);
 
   // ── SMC: animation loop ────────────────────────────────────────
   useEffect(() => {
@@ -1268,6 +1317,18 @@ const ChartPanel = ({
         !(tfBtnRef.current && tfBtnRef.current.contains(e.target)) &&
         !(tfDropdownRef.current && tfDropdownRef.current.contains(e.target))
       ) setTfOpen(false);
+    };
+    document.addEventListener('click', handler);
+    return () => document.removeEventListener('click', handler);
+  }, []);
+
+  // SMC Timeframe dropdown: close on outside click
+  useEffect(() => {
+    const handler = (e) => {
+      if (
+        !(smcTfBtnRef.current && smcTfBtnRef.current.contains(e.target)) &&
+        !(smcTfDropdownRef.current && smcTfDropdownRef.current.contains(e.target))
+      ) setSmcTfOpen(false);
     };
     document.addEventListener('click', handler);
     return () => document.removeEventListener('click', handler);
@@ -1371,19 +1432,58 @@ const ChartPanel = ({
             <ChartLine size={12} weight="bold" />
             <span className="hidden sm:inline">GANN</span>
           </button>
-          {/* SMC toggle */}
-          <button
-            onClick={() => setSmcActive(!smcActive)}
-            className={`px-2 py-1 text-[10px] font-bold uppercase tracking-wider transition-all whitespace-nowrap shrink-0 border ${
-              smcActive
-                ? 'text-[#F5A623] border-[#F5A623]/40 bg-[#F5A623]/8'
-                : 'text-zinc-500 border-transparent'
-            }`}
-            data-testid="smc-toggle"
-            title="SMC Auto Mark — FVG + Liquidity + Order Blocks"
-          >
-            SMC
-          </button>
+          {/* SMC toggle + Timeframe dropdown */}
+          <div className="flex items-stretch shrink-0">
+            <button
+              onClick={() => setSmcActive(!smcActive)}
+              className={`px-2 py-1 text-[10px] font-bold uppercase tracking-wider transition-all whitespace-nowrap border ${
+                smcActive
+                  ? 'text-[#F5A623] border-[#F5A623]/40 bg-[#F5A623]/8'
+                  : 'text-zinc-500 border-transparent'
+              }`}
+              data-testid="smc-toggle"
+              title="SMC Auto Mark — FVG + Liquidity + Order Blocks"
+            >
+              SMC
+            </button>
+            <button
+              ref={smcTfBtnRef}
+              onClick={() => setSmcTfOpen(o => !o)}
+              className={`px-1.5 py-1 text-[9px] font-bold uppercase tracking-wider transition-all whitespace-nowrap border border-l-0 flex items-center gap-0.5 ${
+                smcActive && smcTimeframe !== 'AUTO'
+                  ? 'text-[#F5A623] border-[#F5A623]/40 bg-[#F5A623]/8'
+                  : smcActive
+                  ? 'text-[#F5A623]/70 border-[#F5A623]/40 bg-[#F5A623]/4'
+                  : 'text-zinc-500 border-transparent'
+              }`}
+              data-testid="smc-tf-toggle"
+              title="SMC Timeframe — pick which TF to mark"
+            >
+              {smcTimeframe}
+              <span className="text-[8px] leading-none">▾</span>
+            </button>
+            {smcTfOpen && (
+              <div
+                ref={smcTfDropdownRef}
+                className="absolute z-50 mt-8 bg-black/95 border border-[#F5A623]/40 rounded shadow-2xl py-1 min-w-[80px]"
+                style={{ marginTop: '32px' }}
+                data-testid="smc-tf-dropdown"
+              >
+                {SMC_TF_OPTIONS.map(opt => (
+                  <button
+                    key={opt.label}
+                    onClick={() => { setSmcTimeframe(opt.label); setSmcTfOpen(false); if (!smcActive) setSmcActive(true); }}
+                    className={`w-full text-left px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors hover:bg-[#F5A623]/15 ${
+                      smcTimeframe === opt.label ? 'text-[#F5A623] bg-[#F5A623]/10' : 'text-zinc-300'
+                    }`}
+                    data-testid={`smc-tf-option-${opt.label}`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
           {/* Log toggle */}
           <button
             onClick={() => setSemiLogScale(!semiLogScale)}
