@@ -349,10 +349,11 @@ const ChartPanel = ({
   // Trade Signal (Parity Scanner) price lines
   const tradeSignalLinesRef = useRef([]);
   const [smcActive, setSmcActive] = useState(true);
-  const [smcTimeframe, setSmcTimeframe] = useState('AUTO');
+  const [smcLayers, setSmcLayers] = useState(() => new Set(['AUTO']));
   const [smcTfOpen, setSmcTfOpen] = useState(false);
   const smcTfDropdownRef = useRef(null);
   const smcTfBtnRef = useRef(null);
+  const smcLayerCacheRef = useRef({});
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [selectMode, setSelectMode] = useState(null);
   const [showGannLines, setShowGannLines] = useState(true);
@@ -653,7 +654,7 @@ const ChartPanel = ({
         ctx.beginPath(); ctx.moveTo(hx, top + h); ctx.lineTo(hx + h, top); ctx.stroke();
       }
       ctx.fillStyle = 'rgba(0,230,118,0.95)'; ctx.font = 'bold 8px monospace';
-      ctx.fillText(zone.strength >= 2 ? '★ DZ' : 'DZ', left + 3, top + h - 3);
+      ctx.fillText((zone.strength >= 2 ? '★ DZ' : 'DZ') + (zone._tf && zone._tf !== 'AUTO' ? ` ${zone._tf}` : ''), left + 3, top + h - 3);
       ctx.restore();
     });
 
@@ -677,7 +678,7 @@ const ChartPanel = ({
         ctx.beginPath(); ctx.moveTo(hx, top); ctx.lineTo(hx + h, top + h); ctx.stroke();
       }
       ctx.fillStyle = 'rgba(255,100,50,0.95)'; ctx.font = 'bold 8px monospace';
-      ctx.fillText(zone.strength >= 2 ? '★ SZ' : 'SZ', left + 3, top + 9);
+      ctx.fillText((zone.strength >= 2 ? '★ SZ' : 'SZ') + (zone._tf && zone._tf !== 'AUTO' ? ` ${zone._tf}` : ''), left + 3, top + 9);
       ctx.restore();
     });
 
@@ -695,7 +696,7 @@ const ChartPanel = ({
       ctx.setLineDash([]);
       ctx.fillStyle = 'rgba(255,185,0,0.85)';
       ctx.font = 'bold 7px monospace';
-      const lbl = sw.type === 'high' ? 'LH' : 'LL';
+      const lbl = (sw.type === 'high' ? 'LH' : 'LL') + (sw._tf && sw._tf !== 'AUTO' ? ` ${sw._tf}` : '');
       ctx.fillText(lbl, Math.max(8, x1 - 14), y - 2);
       ctx.restore();
     });
@@ -724,7 +725,7 @@ const ChartPanel = ({
       ctx.strokeRect(left, top, w, h);
       ctx.fillStyle = fvg.type === 'bull' ? 'rgba(0,230,118,0.92)' : 'rgba(255,59,48,0.92)';
       ctx.font = 'bold 8px monospace';
-      ctx.fillText(fvg.type === 'bull' ? 'FVG+' : 'FVG-', left + 3, top + 9);
+      ctx.fillText((fvg.type === 'bull' ? 'FVG+' : 'FVG-') + (fvg._tf && fvg._tf !== 'AUTO' ? ` ${fvg._tf}` : ''), left + 3, top + 9);
       ctx.restore();
     });
 
@@ -752,7 +753,7 @@ const ChartPanel = ({
       ctx.strokeRect(left, top, w, h);
       ctx.fillStyle = ob.type === 'bull' ? 'rgba(59,130,246,0.9)' : 'rgba(255,100,0,0.9)';
       ctx.font = 'bold 7px monospace';
-      ctx.fillText('OB', left + 2, top + 8);
+      ctx.fillText('OB' + (ob._tf && ob._tf !== 'AUTO' ? ` ${ob._tf}` : ''), left + 2, top + 8);
       ctx.restore();
     });
 
@@ -1245,16 +1246,64 @@ const ChartPanel = ({
     return () => { if (vpAnimRef.current) cancelAnimationFrame(vpAnimRef.current); };
   }, [vpActive, drawVPCanvas]);
 
-  // ── SMC: compute when bars or selected SMC timeframe change ───
-  useEffect(() => {
+  // ── SMC: helper to merge multiple TF layers into one draw set ──
+  const mergeSmcLayers = (cache) => {
+    const merged = {
+      fvgs: [], swings: [], obs: [], bosChoch: [],
+      supplyZones: [], demandZones: [], wyckoffPhases: [],
+      manipulations: [], refinedEntries: [], pdZone: null,
+    };
+    Object.values(cache).forEach(layer => {
+      if (!layer) return;
+      ['fvgs','swings','obs','bosChoch','supplyZones','demandZones',
+       'wyckoffPhases','manipulations','refinedEntries'].forEach(k => {
+        if (Array.isArray(layer[k])) merged[k].push(...layer[k]);
+      });
+      if (!merged.pdZone && layer.pdZone) merged.pdZone = layer.pdZone;
+    });
+    return merged;
+  };
+
+  // ── SMC: toggle / clear helpers ────────────────────────────────
+  const toggleSmcLayer = (label) => {
+    setSmcLayers(prev => {
+      const next = new Set(prev);
+      if (next.has(label)) next.delete(label); else next.add(label);
+      return next;
+    });
+    if (!smcActive) setSmcActive(true);
+  };
+  const clearAllSmcLayers = () => {
+    setSmcLayers(new Set());
+    smcLayerCacheRef.current = {};
     smcDataRef.current = null;
-    if (!stockData?.bars?.length) return;
-    const opt = SMC_TF_OPTIONS.find(o => o.label === smcTimeframe);
-    const bars = (opt && opt.minutes)
-      ? resampleBars(stockData.bars, opt.minutes)
-      : stockData.bars;
-    smcDataRef.current = computeSMCData(bars);
-  }, [stockData, smcTimeframe]);
+  };
+
+  // ── SMC: compute each active layer when bars or layer-set change ─
+  useEffect(() => {
+    if (!stockData?.bars?.length || smcLayers.size === 0) {
+      smcDataRef.current = null;
+      smcLayerCacheRef.current = {};
+      return;
+    }
+    const cache = {};
+    smcLayers.forEach(label => {
+      const opt = SMC_TF_OPTIONS.find(o => o.label === label);
+      const bars = (opt && opt.minutes)
+        ? resampleBars(stockData.bars, opt.minutes)
+        : stockData.bars;
+      const smc = computeSMCData(bars);
+      // Tag every item with its source TF for badge rendering
+      ['fvgs','swings','obs','bosChoch','supplyZones','demandZones',
+       'wyckoffPhases','manipulations','refinedEntries'].forEach(k => {
+        if (Array.isArray(smc[k])) smc[k] = smc[k].map(x => ({ ...x, _tf: label }));
+      });
+      if (smc.pdZone) smc.pdZone = { ...smc.pdZone, _tf: label };
+      cache[label] = smc;
+    });
+    smcLayerCacheRef.current = cache;
+    smcDataRef.current = mergeSmcLayers(cache);
+  }, [stockData, smcLayers]);
 
   // ── SMC: animation loop ────────────────────────────────────────
   useEffect(() => {
@@ -1432,8 +1481,8 @@ const ChartPanel = ({
             <ChartLine size={12} weight="bold" />
             <span className="hidden sm:inline">GANN</span>
           </button>
-          {/* SMC toggle + Timeframe dropdown */}
-          <div className="flex items-stretch shrink-0">
+          {/* SMC toggle + Multi-Timeframe layers dropdown */}
+          <div className="flex items-stretch shrink-0 relative">
             <button
               onClick={() => setSmcActive(!smcActive)}
               className={`px-2 py-1 text-[10px] font-bold uppercase tracking-wider transition-all whitespace-nowrap border ${
@@ -1450,37 +1499,57 @@ const ChartPanel = ({
               ref={smcTfBtnRef}
               onClick={() => setSmcTfOpen(o => !o)}
               className={`px-1.5 py-1 text-[9px] font-bold uppercase tracking-wider transition-all whitespace-nowrap border border-l-0 flex items-center gap-0.5 ${
-                smcActive && smcTimeframe !== 'AUTO'
+                smcActive && smcLayers.size > 0
                   ? 'text-[#F5A623] border-[#F5A623]/40 bg-[#F5A623]/8'
-                  : smcActive
-                  ? 'text-[#F5A623]/70 border-[#F5A623]/40 bg-[#F5A623]/4'
-                  : 'text-zinc-500 border-transparent'
+                  : 'text-zinc-400 border-[#F5A623]/30 bg-[#F5A623]/4'
               }`}
               data-testid="smc-tf-toggle"
-              title="SMC Timeframe — pick which TF to mark"
+              title="SMC Timeframes — click to add/remove TF layers"
             >
-              {smcTimeframe}
+              {smcLayers.size === 0
+                ? 'TF'
+                : smcLayers.size === 1
+                ? Array.from(smcLayers)[0]
+                : `${smcLayers.size} TFs`}
               <span className="text-[8px] leading-none">▾</span>
             </button>
             {smcTfOpen && (
               <div
                 ref={smcTfDropdownRef}
-                className="absolute z-50 mt-8 bg-black/95 border border-[#F5A623]/40 rounded shadow-2xl py-1 min-w-[80px]"
-                style={{ marginTop: '32px' }}
+                className="absolute z-50 top-full left-0 mt-1 bg-black/95 border border-[#F5A623]/40 rounded shadow-2xl py-1 min-w-[110px]"
                 data-testid="smc-tf-dropdown"
               >
-                {SMC_TF_OPTIONS.map(opt => (
-                  <button
-                    key={opt.label}
-                    onClick={() => { setSmcTimeframe(opt.label); setSmcTfOpen(false); if (!smcActive) setSmcActive(true); }}
-                    className={`w-full text-left px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors hover:bg-[#F5A623]/15 ${
-                      smcTimeframe === opt.label ? 'text-[#F5A623] bg-[#F5A623]/10' : 'text-zinc-300'
-                    }`}
-                    data-testid={`smc-tf-option-${opt.label}`}
-                  >
-                    {opt.label}
-                  </button>
-                ))}
+                <div className="px-2 py-1 text-[8px] text-zinc-500 uppercase tracking-wider border-b border-white/5">
+                  Click to add / remove
+                </div>
+                {SMC_TF_OPTIONS.map(opt => {
+                  const active = smcLayers.has(opt.label);
+                  return (
+                    <button
+                      key={opt.label}
+                      onClick={() => toggleSmcLayer(opt.label)}
+                      className={`w-full text-left px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors hover:bg-[#F5A623]/15 flex items-center justify-between ${
+                        active ? 'text-[#F5A623] bg-[#F5A623]/10' : 'text-zinc-300'
+                      }`}
+                      data-testid={`smc-tf-option-${opt.label}`}
+                    >
+                      <span>{opt.label}</span>
+                      <span className="text-[10px]">{active ? '✓' : ''}</span>
+                    </button>
+                  );
+                })}
+                {smcLayers.size > 0 && (
+                  <>
+                    <div className="border-t border-white/5 my-1" />
+                    <button
+                      onClick={() => { clearAllSmcLayers(); setSmcTfOpen(false); }}
+                      className="w-full text-left px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-red-400 hover:bg-red-500/15 transition-colors"
+                      data-testid="smc-tf-clear-all"
+                    >
+                      ✕ Clear All
+                    </button>
+                  </>
+                )}
               </div>
             )}
           </div>
