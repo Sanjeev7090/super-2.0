@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import { X } from '@phosphor-icons/react';
+import { BullIcon, BearIcon } from './BullBearIcons';
 
 /**
  * Nifty50LiveModal
@@ -66,8 +67,12 @@ export default function Nifty50LiveModal({ data, onClose, onRefresh }) {
         {/* Header */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/60">
           <div className="flex items-center gap-3">
-            <span className="text-2xl leading-none">
-              {data?.dominant === 'bullish' ? '🐂' : data?.dominant === 'bearish' ? '🐻' : '⚖️'}
+            <span className="inline-flex items-center justify-center" style={{ width: 40, height: 32 }}>
+              {data?.dominant === 'bullish'
+                ? <BullIcon size={36} fill="#00E676" />
+                : data?.dominant === 'bearish'
+                ? <BearIcon size={36} fill="#FF3B30" />
+                : <span style={{ fontSize: 24, color: '#F5A623' }}>⚖</span>}
             </span>
             <div>
               <div className="text-sm font-black uppercase tracking-wider text-slate-800 dark:text-white">

@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import axios from 'axios';
 import Nifty50LiveModal from './Nifty50LiveModal';
+import { BullIcon, BearIcon } from './BullBearIcons';
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -45,12 +46,12 @@ export default function AdvanceDeclineTicker() {
     // Randomly pick which animal — heavily biased by dominant sentiment
     const rand = Math.random();
     let animal;
-    if (isBull) animal = rand < 0.85 ? '🐂' : '🐻';
-    else if (isBear) animal = rand < 0.85 ? '🐻' : '🐂';
-    else animal = rand < 0.5 ? '🐂' : '🐻';
+    if (isBull) animal = rand < 0.85 ? 'bull' : 'bear';
+    else if (isBear) animal = rand < 0.85 ? 'bear' : 'bull';
+    else animal = rand < 0.5 ? 'bull' : 'bear';
 
     // Direction: bull tends L→R, bear tends R→L (but not always)
-    const rtl = animal === '🐻' ? Math.random() < 0.75 : Math.random() < 0.25;
+    const rtl = animal === 'bear' ? Math.random() < 0.75 : Math.random() < 0.25;
     const W = window.innerWidth;
     const H = window.innerHeight;
     const startX = rtl ? W + 260 : -260;
@@ -111,7 +112,7 @@ export default function AdvanceDeclineTicker() {
     if (!run || !runRef.current || !partContainerRef.current) return;
     const el = runRef.current;
     const cont = partContainerRef.current;
-    const isBull = run.animal === '🐂';
+    const isBull = run.animal === 'bull';
     const kind = isBull ? 'sparkle' : 'smoke';
     let raf = null;
     let lastSpawn = 0;
@@ -180,7 +181,6 @@ export default function AdvanceDeclineTicker() {
   const bearish = dominant === 'bearish';
 
   // Emoji + color scheme based on dominant sentiment
-  const animal = bullish ? '🐂' : bearish ? '🐻' : '⚖️';
   const accent = bullish ? '#00E676' : bearish ? '#FF3B30' : '#F5A623';
   const bgTint = bullish ? 'rgba(0,230,118,0.06)' : bearish ? 'rgba(255,59,48,0.06)' : 'rgba(245,166,35,0.06)';
 
@@ -206,12 +206,17 @@ export default function AdvanceDeclineTicker() {
           style={{ background: bgTint }}
         >
           <span
-            className={`ad-3d-emoji inline-block ${bullish ? 'ad-run-right' : bearish ? 'ad-run-left' : ''}`}
+            className={`ad-3d-emoji inline-flex items-center justify-center ${bullish ? 'ad-run-right' : bearish ? 'ad-run-left' : ''}`}
             aria-label={dominant}
             onClick={(e) => { e.stopPropagation(); triggerRun(); }}
             title="Click to launch full-screen run"
+            style={{ width: 32, height: 26 }}
           >
-            {animal}
+            {bullish
+              ? <BullIcon size={30} fill="#00E676" />
+              : bearish
+              ? <BearIcon size={30} fill="#FF3B30" />
+              : <span style={{ fontSize: 20, color: '#F5A623' }}>⚖</span>}
           </span>
           <div className="flex flex-col leading-tight">
             <span className="text-[9px] uppercase tracking-widest text-zinc-500 dark:text-zinc-400 font-semibold">
@@ -320,8 +325,7 @@ export default function AdvanceDeclineTicker() {
 
         /* Full-screen 3D bull / bear */
         .ad-fullscreen-3d {
-          font-size: clamp(120px, 22vw, 260px);
-          line-height: 1;
+          line-height: 0;
           position: absolute;
           top: 0; left: 0;
           transform-origin: center;
@@ -385,9 +389,11 @@ export default function AdvanceDeclineTicker() {
             ref={runRef}
             key={run.key}
             className="ad-fullscreen-3d"
-            style={{ zIndex: 1 }}
+            style={{ zIndex: 1, width: 'min(45vw, 480px)', height: 'min(45vw, 480px)' }}
           >
-            {run.animal}
+            {run.animal === 'bull'
+              ? <BullIcon size="100%" fill="#00E676" style={{ width: '100%', height: '100%' }} />
+              : <BearIcon size="100%" fill="#FF3B30" style={{ width: '100%', height: '100%' }} />}
           </div>
         </div>
       )}
