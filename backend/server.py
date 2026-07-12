@@ -2176,7 +2176,9 @@ async def get_nse_index_option_intraday(
         "MIDCPNIFTY": "^CNXMIDCAP",
         "NIFTYNXT50": "^NSMIDCP",
     }
-    yf_ticker = yf_map.get(sym, "^NSEI")
+    if sym not in yf_map:
+        raise HTTPException(400, f"Unknown underlying: {sym}. Supported: {', '.join(yf_map)}")
+    yf_ticker = yf_map[sym]
 
     interval_yf_map = {1: "1m", 2: "2m", 5: "5m", 15: "15m"}
     yf_interval = interval_yf_map.get(interval_min, "5m")

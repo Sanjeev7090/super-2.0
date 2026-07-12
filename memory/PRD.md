@@ -186,7 +186,15 @@ Clone trading app → Add dark/light mode, mobile responsiveness, MiroFish LangG
 - Click OFF → clears VP, hides canvas
 - No longer auto-activates on stock selection (manual control like PATTERNS/EMA)
 
-### NIFTY 50 Options Fix (502 → 200)
+### NIFTY Options Click → Chart Load Fixed (July 2026)
+- New endpoint `/api/option/index-intraday` — synthesizes NIFTY/BANKNIFTY/FINNIFTY/MIDCPNIFTY option intraday bars
+  using yfinance spot (^NSEI, ^NSEBANK, ^CNXFIN) + India VIX + Black-Scholes (same as /option/sensex-intraday)
+- Returns 120 × 5-min bars per option, is_live_derived=true
+- Frontend `fetchOptionIntraday` now routes: SENSEX → /sensex-intraday, NSE-derived → /index-intraday, live NSE → /intraday
+- `handleOptionSelect` fixed: `isSensex` no longer incorrectly catches NSE-derived options
+- Unknown underlying returns HTTP 400 with supported list
+
+
 - NSE option chain API was blocked → returned empty data → HTTP 502
 - Added Black-Scholes derived fallback (`_fetch_nse_index_derived_options`) for NIFTY/BANKNIFTY/FINNIFTY/MIDCPNIFTY/NIFTYNXT50
 - Uses live yfinance spot price + India VIX + Black-Scholes Greeks (delta, theta, IV)
