@@ -2134,6 +2134,161 @@ async def get_sensex_option_intraday(
     return result
 
 
+@api_router.get("/option/index-intraday")
+async def get_nse_index_option_intraday(
+    underlying: str = Query(..., description="NIFTY | BANKNIFTY | FINNIFTY | MIDCPNIFTY | NIFTYNXT50"),
+    strike: float = Query(...),
+    option_type: str = Query(..., pattern="^(CE|PE|ce|pe)$"),
+    expiry: str = Query(..., description="DD-Mon-YYYY"),
+    interval_min: int = Query(5, ge=1, le=15),
+):
+    """Black-Scholes synthesized intraday bars for NSE index options (NIFTY / BANKNIFTY / FINNIFTY …).
+
+    Uses yfinance for the underlying spot bars + India VIX as sigma —
+    same methodology as /option/sensex-intraday but parameterised for NSE indices.
+    """
+    import math
+
+    sym = underlying.upper()
+    opt = option_type.upper()
+    if opt not in ("CE", "PE"):
+        raise HTTPException(400, "option_type must be CE or PE")
+
+    try:
+        exp_obj = datetime.strptime(expiry, "%d-%b-%Y")
+    except ValueError:
+        try:
+            exp_obj = datetime.strptime(expiry, "%d-%m-%Y")
+        except ValueError:
+            raise HTTPException(400, f"Invalid expiry format: {expiry}")
+    expiry_display = exp_obj.strftime("%d-%b-%Y")
+
+    cache_key = f"nse_idx_opt_intra_{sym}_{int(strike)}_{opt}_{expiry_display}_{interval_min}"
+    if cache_key in cache_storage:
+        cached_data, cached_time = cache_storage[cache_key]
+        if (datetime.now() - cached_time).seconds < 30:
+            return cached_data
+
+    yf_map = {
+        "NIFTY":      "^NSEI",
+        "BANKNIFTY":  "^NSEBANK",
+        "FINNIFTY":   "^CNXFIN",
+        "MIDCPNIFTY": "^CNXMIDCAP",
+        "NIFTYNXT50": "^NSMIDCP",
+    }
+    yf_ticker = yf_map.get(sym, "^NSEI")
+
+    interval_yf_map = {1: "1m", 2: "2m", 5: "5m", 15: "15m"}
+    yf_interval = interval_yf_map.get(interval_min, "5m")
+    period = "7d" if yf_interval == "1m" else "60d"
+
+    try:
+        spot_ticker = yf.Ticker(yf_ticker)
+        hist = spot_ticker.history(period=period, interval=yf_interval)
+    except Exception as e:
+        raise HTTPException(502, f"Failed to fetch {sym} spot bars from yfinance: {e}")
+
+    if hist is None or hist.empty:
+        raise HTTPException(404, f"No intraday data available for {sym} ({yf_ticker})")
+
+    hist = hist.tail(120)
+
+    try:
+        sigma = _fetch_live_india_vix()
+    except Exception:
+        sigma = 0.15
+
+    r_rate = 0.065
+    today_d = datetime.now().date()
+    K = float(strike)
+    is_call = (opt == "CE")
+
+    def _ncdf(x):
+        return 0.5 * (1 + math.erf(x / math.sqrt(2)))
+
+    def bs(S, K, T, r, sig, call):
+        if T <= 0 or S <= 0 or K <= 0 or sig <= 0:
+            return 0.0
+        try:
+            d1 = (math.log(S / K) + (r + 0.5 * sig ** 2) * T) / (sig * math.sqrt(T))
+            d2 = d1 - sig * math.sqrt(T)
+            if call:
+                return max(0.0, S * _ncdf(d1) - K * math.exp(-r * T) * _ncdf(d2))
+            return max(0.0, K * math.exp(-r * T) * _ncdf(-d2) - S * _ncdf(-d1))
+        except Exception:
+            return 0.0
+
+    bars = []
+    for ts, row in hist.iterrows():
+        try:
+            o_s = float(row["Open"])
+            h_s = float(row["High"])
+            l_s = float(row["Low"])
+            c_s = float(row["Close"])
+        except Exception:
+            continue
+        if not all([o_s, h_s, l_s, c_s]):
+            continue
+
+        try:
+            bar_dt = ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts
+            bar_date = bar_dt.date() if hasattr(bar_dt, "date") else today_d
+        except Exception:
+            bar_date = today_d
+        T_bar = max((exp_obj.date() - bar_date).days / 365.0, 1 / 365)
+
+        if is_call:
+            iv = sigma * (1 + 0.05 * max(0, (K - c_s) / max(c_s, 1) * 10))
+            o  = bs(o_s, K, T_bar, r_rate, iv, True)
+            c  = bs(c_s, K, T_bar, r_rate, iv, True)
+            hi = bs(h_s, K, T_bar, r_rate, iv, True)
+            lo = bs(l_s, K, T_bar, r_rate, iv, True)
+        else:
+            iv = sigma * (1 + 0.10 * max(0, (c_s - K) / max(c_s, 1) * 10))
+            o  = bs(o_s, K, T_bar, r_rate, iv, False)
+            c  = bs(c_s, K, T_bar, r_rate, iv, False)
+            hi = bs(l_s, K, T_bar, r_rate, iv, False)
+            lo = bs(h_s, K, T_bar, r_rate, iv, False)
+
+        try:
+            ts_sec = int(bar_dt.timestamp())
+        except Exception:
+            continue
+
+        if max(o, hi, lo, c) < 0.01:
+            continue
+
+        bars.append({
+            "timestamp": ts_sec,
+            "open":  round(o,  2),
+            "high":  round(hi, 2),
+            "low":   round(lo, 2),
+            "close": round(c,  2),
+            "volume": 0,
+        })
+
+    if not bars:
+        raise HTTPException(404, f"Could not synthesize {sym} option bars — check strike/expiry")
+
+    label = "Call" if is_call else "Put"
+    result = {
+        "ticker": f"{sym}{int(K)}{opt}_{expiry_display}",
+        "instrument": f"{sym} {int(K)} {label}",
+        "underlying": sym,
+        "strike": K,
+        "type": opt,
+        "expiry": expiry_display,
+        "interval_min": interval_min,
+        "bars": bars,
+        "india_vix": round(sigma * 100, 2),
+        "is_live_derived": True,
+        "note": f"BS-synthesized · {sym} spot {yf_ticker} · India VIX {sigma*100:.1f}%",
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    cache_storage[cache_key] = (result, datetime.now())
+    return result
+
+
 @api_router.post("/gann/fan", response_model=GannFanResponse)
 async def calculate_gann_fan(request: GannFanRequest):
     """Calculate Gann Fan angles from a pivot point"""

@@ -407,22 +407,38 @@ const TradingDashboard = () => {
     setLoading(true);
     try {
       const expiry = option.expiry_display || option.expiry;
-      const isSensex = option.underlying === 'SENSEX' || option.is_indicative || option.is_live_derived;
-      const url = isSensex ? `${API}/option/sensex-intraday` : `${API}/option/intraday`;
-      const params = isSensex
-        ? {
-            strike: option.strike,
-            option_type: option.type,
-            expiry,
-            interval_min: Math.max(intervalMin, 5),
-          }
-        : {
-            underlying: option.underlying,
-            strike: option.strike,
-            option_type: option.type,
-            expiry,
-            interval_min: intervalMin,
-          };
+      const isSensex = option.underlying === 'SENSEX' || option.is_indicative;
+      const isNseIndexDerived = option.is_live_derived && !isSensex;
+
+      let url, params;
+      if (isSensex) {
+        url = `${API}/option/sensex-intraday`;
+        params = {
+          strike: option.strike,
+          option_type: option.type,
+          expiry,
+          interval_min: Math.max(intervalMin, 5),
+        };
+      } else if (isNseIndexDerived) {
+        url = `${API}/option/index-intraday`;
+        params = {
+          underlying: option.underlying,
+          strike: option.strike,
+          option_type: option.type,
+          expiry,
+          interval_min: Math.max(intervalMin, 5),
+        };
+      } else {
+        url = `${API}/option/intraday`;
+        params = {
+          underlying: option.underlying,
+          strike: option.strike,
+          option_type: option.type,
+          expiry,
+          interval_min: intervalMin,
+        };
+      }
+
       const response = await axios.get(url, { params });
       setStockData({
         ticker: response.data.ticker,
@@ -437,11 +453,9 @@ const TradingDashboard = () => {
 
   const handleOptionSelect = (option) => {
     const expiryNorm = option.expiry_display || option.expiry || '';
-    const isSensex = option.underlying === 'SENSEX' || option.is_indicative || option.is_live_derived;
+    const isSensex = option.underlying === 'SENSEX' || option.is_indicative;
+    const isNseIndexDerived = option.is_live_derived && !isSensex;
 
-    // Build a synthetic stock object for the option so the chart panel knows
-    // what to render. type='OPTION' lets us guard against stock-specific flows
-    // (WS subscribe, signal/pivot, gann fan).
     const stock = {
       ticker: isSensex
         ? `SENSEX${option.strike}${option.type}_${expiryNorm}`
@@ -455,7 +469,7 @@ const TradingDashboard = () => {
       last_price: option.last_price,
       change_pct: option.change_pct,
       selectedOption: option,
-      is_live_derived: isSensex,
+      is_live_derived: option.is_live_derived || false,
     };
     setStockData(null);
     setPivotPoint(null);
@@ -463,14 +477,12 @@ const TradingDashboard = () => {
     setSignal(null);
     setSelectedStock(stock);
     setOptionsSheet(null);
-    // SENSEX BS-synthesized chart uses 5m bars (yfinance minimum reliable for ^BSESN intraday)
-    const optTf = isSensex
-      ? { multiplier: 5, timespan: 'minute', label: '5M' }
-      : { multiplier: 1, timespan: 'minute', label: '1MIN' };
+    const optTf = { multiplier: 5, timespan: 'minute', label: '5M' };
     setTimeframe(optTf);
-    fetchOptionIntraday(option, isSensex ? 5 : 1);
+    fetchOptionIntraday(option, 5);
     setMobilePanel('chart');
-    const desc = `₹${option.last_price.toFixed(2)} (${option.change_pct >= 0 ? '+' : ''}${option.change_pct.toFixed(2)}%) · Exp ${expiryNorm}${isSensex ? ' · BS-Derived' : ''}`;
+    const derivedTag = (isSensex || isNseIndexDerived) ? ' · BS-Derived' : '';
+    const desc = `₹${option.last_price.toFixed(2)} (${option.change_pct >= 0 ? '+' : ''}${option.change_pct.toFixed(2)}%) · Exp ${expiryNorm}${derivedTag}`;
     toast.success(`${option.instrument} chart loaded`, { description: desc });
   };
 
