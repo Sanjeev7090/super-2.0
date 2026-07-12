@@ -8655,13 +8655,14 @@ def _of_buy_sell_vol(o, h, l, c, v):
 
 def _of_calc_atr(bars, period=14):
     if len(bars) < 2:
-        return (bars[-1]['high'] - bars[-1]['low']) * 0.02 if bars else 1
+        return max((bars[-1]['high'] - bars[-1]['low']) * 0.02, 0.01) if bars else 1
     trs = []
     for i in range(1, len(bars)):
         h, l, cp = bars[i]['high'], bars[i]['low'], bars[i-1]['close']
         trs.append(max(h - l, abs(h - cp), abs(l - cp)))
     window = trs[-period:]
-    return sum(window) / len(window) if window else trs[-1]
+    avg = sum(window) / len(window) if window else trs[-1]
+    return max(avg, 0.01)  # never return 0 — prevents downstream division by zero
 
 
 def _of_volume_profile(bars, n_bins=24):
@@ -8673,9 +8674,12 @@ def _of_volume_profile(bars, n_bins=24):
         return [], 0, 0, 0
     price_min = min(b['low'] for b in bars)
     price_max = max(b['high'] for b in bars)
-    if price_max == price_min:
-        price_max = price_min * 1.01
+    if price_max <= price_min:
+        # Prevent bin_size = 0: use absolute minimum range
+        price_max = price_min + 1.0 if price_min == 0 else price_min * 1.01
     bin_size = (price_max - price_min) / n_bins
+    if bin_size <= 0:
+        bin_size = 0.01  # absolute fallback guard
     totals = [0.0] * n_bins
     buys   = [0.0] * n_bins
     sells  = [0.0] * n_bins
@@ -8740,9 +8744,11 @@ def _of_footprint_candle(idx, bar, n_levels=8):
     """Build a synthetic footprint for one candle."""
     o, h, l, c, v = bar['open'], bar['high'], bar['low'], bar['close'], bar.get('volume', 0)
     rng = h - l
-    if rng == 0:
-        rng = l * 0.001 or 0.01
+    if rng <= 0:
+        rng = max(l * 0.001, 0.01)  # never zero even when price is 0
     lev_size = rng / n_levels
+    if lev_size <= 0:
+        lev_size = 0.001  # absolute fallback
     total_bv, total_sv = _of_buy_sell_vol(o, h, l, c, v)
     bullish = c >= o
 

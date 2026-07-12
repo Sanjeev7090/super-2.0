@@ -1,0 +1,39 @@
+{
+  "summary": "Backend-only testing of OrderFlow analyze endpoint fix for ZeroDivisionError with zero/near-zero NIFTY option prices. All 12 tests pass — the bug fix is verified as working.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_orderflow_zero.py",
+    "/app/test_reports/pytest/pytest_orderflow_zero.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Fix verified: _of_volume_profile now uses `price_max = price_min + 1.0 if price_min == 0 else price_min * 1.01` and has `bin_size <= 0` guard — prevents ZeroDivisionError for all-zero bars.",
+    "_of_calc_atr now returns max(avg, 0.01) ensuring ATR is never 0, preventing downstream division errors.",
+    "_of_footprint_candle uses `max(l * 0.001, 0.01)` guard for rng — safe even when price=0.",
+    "All three guards together fully resolve the 'float division by zero' error reported from TopOptionsSheet modal."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_orderflow_zero.py"
+  ],
+  "success_rate": {
+    "backend": "100% (12/12 tests passed)",
+    "frontend": "Not tested (backend-only task)"
+  },
+  "seed_data_creation": "None",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "The ZeroDivisionError bug in POST /api/orderflow/analyze for NIFTY option rows with zero/near-zero prices is fully fixed. Test file at /app/backend/tests/test_orderflow_zero.py covers: all-zero bars (35), tiny price bars (0.01-0.05), mixed zero+tiny bars, ATR > 0 validation, poc/vah/val finite check, response structure, and the exact /tmp/test_orderflow.json bug payload. All 12 pass against the public URL.",
+  "rca_of_the_issue": {
+    "root_cause": "Three ZeroDivisionError paths when option prices are 0: (1) _of_volume_profile: price_max == price_min == 0 made bin_size = 0/n_bins = 0.0, causing subsequent integer divisions to produce ZeroDivisionError. (2) _of_calc_atr: avg of all-zero TRs returned 0, causing downstream ATR-based calculations (poc_margin = atr*0.5, rr = reward/risk) to divide by zero. (3) _of_footprint_candle: rng=h-l=0 path used l*0.001 which is 0 when l=0.",
+    "fix_applied": "1) price_max guard: price_min+1.0 when price_min==0. 2) bin_size<=0 fallback to 0.01. 3) ATR returns max(avg,0.01). 4) footprint rng uses max(l*0.001, 0.01).",
+    "reproduction_steps": "POST /api/orderflow/analyze with 35 bars all having open=high=low=close=0.0 and volume=0 — previously returned 500 with 'float division by zero', now returns 200 with valid WAIT signal."
+  }
+}
