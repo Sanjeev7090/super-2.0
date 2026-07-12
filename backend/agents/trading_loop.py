@@ -81,6 +81,39 @@ HIGH_VOL_ATR_PCT = 0.035   # ATR > 3.5% → "high volatility"
 EXTREME_VOL_PCT  = 0.055   # ATR > 5.5% → force HOLD
 
 
+def _dynamic_conf_threshold(watchlist_obs: Dict[str, Dict]) -> int:
+    """
+    C. Dynamic Confidence Threshold:
+    Adjust the execution threshold based on market volatility.
+
+    Proxy: average ATR% across all observed watchlist tickers.
+    India VIX normal range ~13–16% → ATR% ~1.2–1.8% per day.
+    High VIX 20–25 → ATR% ~2.5–3.5%.
+
+    Formula:
+        base = 58
+        extra = clamp((avg_atr_pct * 100 - 1.5) * 4, 0, 18)
+        threshold = clamp(base + extra, 48, 76)
+
+    Examples:
+        ATR%=1.5% (VIX~15)  → threshold=58
+        ATR%=2.5% (VIX~20)  → threshold=62
+        ATR%=3.5% (VIX~25)  → threshold=66
+        ATR%=5.5% (extreme) → threshold=76 (capped)
+    """
+    if not watchlist_obs:
+        return 58  # default
+
+    atrs = [v.get("atr_pct", 1.5) for v in watchlist_obs.values() if v.get("atr_pct")]
+    if not atrs:
+        return 58
+
+    avg_atr = sum(atrs) / len(atrs)   # already in % (e.g. 1.5 = 1.5%)
+    extra   = min(18, max(0, (avg_atr - 1.5) * 4))
+    threshold = int(58 + extra)
+    return min(76, max(48, threshold))
+
+
 # ════════════════════════════════════════════════════════════════════════════════
 # TRADING LOOP
 # ════════════════════════════════════════════════════════════════════════════════
@@ -640,6 +673,11 @@ class TradingLoop:
             # ════════════════════════════════════════════════════════════════
             current_open_count = len(engine.get_open_positions())
 
+            # C. Dynamic Confidence Threshold — scales up with market volatility
+            dyn_threshold = _dynamic_conf_threshold(watchlist_obs)
+            logger.info("[TradingLoop][%s] Dynamic conf threshold = %d (from avg ATR of %d tickers)",
+                        cycle_id, dyn_threshold, len(watchlist_obs))
+
             for ticker in watchlist:
                 if current_open_count + entries_this_cycle >= max_parallel:
                     logger.info("[TradingLoop][%s] Max parallel (%d) reached — execution stopped",
@@ -655,10 +693,10 @@ class TradingLoop:
                 confidence = obs.get("confidence", 0)
                 live_price = obs.get("price", 0.0)
 
-                # Brain threshold: confidence must exceed 58 to execute
-                if signal not in ("BUY", "SELL") or confidence <= 58:
-                    logger.info("[TradingLoop][%s] %s -> HOLD (exec skip) | conf=%.0f%% | %s",
-                                cycle_id, ticker, confidence, obs.get("brain_reason", "")[:60])
+                # C. Use dynamic threshold instead of hardcoded 58
+                if signal not in ("BUY", "SELL") or confidence <= dyn_threshold:
+                    logger.info("[TradingLoop][%s] %s -> HOLD (exec skip) | conf=%.0f%% threshold=%d | %s",
+                                cycle_id, ticker, confidence, dyn_threshold, obs.get("brain_reason", "")[:60])
                     continue
 
                 qty       = risk_profile.get("quantity", 1) or 1
@@ -725,7 +763,7 @@ class TradingLoop:
 
             elapsed_ms = (time.perf_counter() - t_start) * 1000
             self._update_state("last_cycle_status",
-                               f"ok:{last_signal}:{last_conf:.0f}% ({len(watchlist)} tickers, {len(final_open)} open)")
+                               f"ok:{last_signal}:{last_conf:.0f}% ({len(watchlist)} tickers, {len(final_open)} open, thr={dyn_threshold})")
             self._update_state("last_cycle_time",
                                datetime.now(timezone.utc).isoformat())
             self._update_state("next_cycle_time",

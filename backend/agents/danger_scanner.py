@@ -77,6 +77,39 @@ _SCAN_CACHE: dict = {"ts": 0.0, "data": None}
 _CACHE_TTL = 90.0   # 90s — danger mode rescans more frequently
 
 
+# ─── B. Diversity + Randomness helpers ───────────────────────────────────────
+
+def _apply_diversity_and_noise(results: List[dict], top_n: int) -> List[dict]:
+    """
+    Apply two improvements to scanner output:
+    1. ±12% score noise — breaks ties, surfaces different stocks each run.
+    2. Sector diversity — cap each sector at MAX_PER_SECTOR picks.
+    """
+    import random
+
+    # 1. Inject ±12% multiplicative noise on final_score
+    for r in results:
+        noise = r["final_score"] * random.uniform(-0.12, 0.12)
+        r["noisy_score"] = round(r["final_score"] + noise, 1)
+
+    # 2. Sort by noisy score descending
+    results.sort(key=lambda x: x.get("noisy_score", x["final_score"]), reverse=True)
+
+    # 3. Sector cap: max 2 picks per sector
+    MAX_PER_SECTOR = 2
+    sector_count: Dict[str, int] = {}
+    diverse: List[dict] = []
+    for r in results:
+        sector = r.get("sector", "Other")
+        if sector_count.get(sector, 0) < MAX_PER_SECTOR:
+            diverse.append(r)
+            sector_count[sector] = sector_count.get(sector, 0) + 1
+        if len(diverse) >= top_n:
+            break
+
+    return diverse
+
+
 def _score_one(meta: dict) -> Optional[dict]:
     """Compute momentum + vol score for one ticker. Returns None on failure."""
     try:
@@ -230,16 +263,24 @@ def run_danger_scan(top_n: int = 5, force: bool = False) -> List[dict]:
     # 3. Sort by final score descending
     results.sort(key=lambda r: r["final_score"], reverse=True)
 
+    # 4. Apply B: Diversity + Randomness (sector cap + noise)
+    diverse = _apply_diversity_and_noise(results, top_n + 5)  # +5 buffer before cap
+
     elapsed = round(time.time() - t0, 2)
+    top_pick = diverse[0] if diverse else (results[0] if results else {})
     logger.info(
-        "[DangerScan] Scanned %d tickers in %.1fs → top pick: %s (%.1f)",
-        len(results), elapsed, results[0]["ticker"] if results else "—", results[0]["final_score"] if results else 0,
+        "[DangerScan] Scanned %d tickers in %.1fs → top pick: %s (score=%.1f noisy=%.1f) sectors=%s",
+        len(results), elapsed,
+        top_pick.get("ticker", "—"),
+        top_pick.get("final_score", 0),
+        top_pick.get("noisy_score", 0),
+        list({r.get("sector") for r in diverse[:top_n]}),
     )
 
     _SCAN_CACHE["ts"]   = now
-    _SCAN_CACHE["data"] = results
+    _SCAN_CACHE["data"] = diverse
 
-    return results[:top_n]
+    return diverse[:top_n]
 
 
 async def async_danger_scan(top_n: int = 5, force: bool = False) -> List[dict]:

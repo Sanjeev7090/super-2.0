@@ -485,6 +485,99 @@ def _batch_fetch_indicators(tickers: List[str]) -> Dict[str, Any]:
     return results
 
 
+def _diversify_with_noise(results: List[Dict], top_n: int) -> List[Dict]:
+    """
+    B. Diversity + Randomness for universe scanner:
+    - ±12% noise on confidence score (prevents same stocks every run)
+    - Sector diversity: max 3 picks per sector in final output
+    """
+    import random
+
+    # Build sector from segment/ticker heuristic
+    _SECTOR_MAP = {
+        "HDFCBANK": "Banking", "ICICIBANK": "Banking", "SBIN": "Banking",
+        "AXISBANK": "Banking", "KOTAKBANK": "Banking", "INDUSINDBK": "Banking",
+        "BANKBARODA": "Banking", "IDFCFIRSTB": "Banking", "FEDERALBNK": "Banking",
+        "TCS": "IT", "INFY": "IT", "HCLTECH": "IT", "WIPRO": "IT",
+        "TECHM": "IT", "LTIM": "IT", "PERSISTENT": "IT", "MPHASIS": "IT",
+        "RELIANCE": "Energy", "ONGC": "Energy", "BPCL": "Energy", "GAIL": "Energy",
+        "SUNPHARMA": "Pharma", "DRREDDY": "Pharma", "CIPLA": "Pharma", "DIVISLAB": "Pharma",
+        "TATASTEEL": "Metals", "JSWSTEEL": "Metals", "HINDALCO": "Metals", "COALINDIA": "Metals",
+        "MARUTI": "Auto", "TATAMOTORS": "Auto", "BAJAJ-AUTO": "Auto", "EICHERMOT": "Auto",
+        "HEROMOTOCO": "Auto", "M&M": "Auto",
+        "BAJFINANCE": "NBFC", "BAJAJFINSV": "NBFC",
+        "ITC": "FMCG", "NESTLEIND": "FMCG", "TATACONSUM": "FMCG", "BRITANNIA": "FMCG",
+        "LT": "Infra", "NTPC": "Power", "POWERGRID": "Power", "TATAPOWER": "Power",
+        "BHARTIARTL": "Telecom", "ADANIPORTS": "Ports", "DLF": "Realty",
+        "APOLLOHOSP": "Healthcare",
+    }
+
+    for r in results:
+        base = r["ticker"].replace(".NS", "").replace(".BO", "").split("-")[0].upper()
+        r["_sector"] = _SECTOR_MAP.get(base, r.get("segment", "Other"))
+
+    # Inject ±12% noise
+    for r in results:
+        r["_noisy_conf"] = r["confidence"] * (1 + random.uniform(-0.12, 0.12))
+
+    results.sort(key=lambda x: x.get("_noisy_conf", x["confidence"]), reverse=True)
+
+    MAX_PER_SECTOR = 3
+    sector_count: Dict[str, int] = {}
+    diverse: List[Dict] = []
+    for r in results:
+        sec = r["_sector"]
+        if sector_count.get(sec, 0) < MAX_PER_SECTOR:
+            diverse.append(r)
+            sector_count[sec] = sector_count.get(sec, 0) + 1
+        if len(diverse) >= top_n:
+            break
+
+    return diverse
+
+
+def _brain_gate_top_picks(picks: List[Dict]) -> List[Dict]:
+    """
+    A. HybridSuperBrain as Truly Central:
+    Validate top scanner picks through Brain survival + market context gate.
+    Adds brain_gate: 'PASS'|'WARN'|'SKIP' and brain_conf to each pick.
+    Runs only on top 15 picks to stay fast.
+    """
+    try:
+        from agents.hybrid_super_brain import hybrid_brain
+        for pick in picks[:15]:
+            try:
+                ind = pick
+                market_data = {
+                    "price":    pick.get("price", 0),
+                    "rsi14":    pick.get("rsi14", 50),
+                    "atr_pct":  pick.get("atr14", 0) / max(pick.get("price", 1), 1),
+                    "regime":   pick.get("regime", "SIDEWAYS"),
+                    "vol_ratio": pick.get("vol_ratio", 1.0),
+                    "mom5":     pick.get("mom5", 0),
+                }
+                decision = hybrid_brain.decide_sync(
+                    market_data=market_data,
+                    symbol=pick["ticker"].replace(".NS", "").replace(".BO", "").upper(),
+                )
+                brain_action = decision.get("action", "HOLD")
+                brain_conf   = float(decision.get("confidence", 0))
+                fear         = float(decision.get("survival", {}).get("fear", 0))
+                scanner_act  = pick.get("action", "HOLD")
+
+                # Gate logic: Brain agrees or is neutral, fear < 70%
+                agrees = brain_action == scanner_act or brain_action == "HOLD"
+                pick["brain_gate"]   = "PASS" if (agrees and brain_conf >= 50 and fear < 0.70) else "WARN"
+                pick["brain_action"] = brain_action
+                pick["brain_conf"]   = round(brain_conf, 1)
+                pick["brain_fear"]   = round(fear, 3)
+            except Exception:
+                pick["brain_gate"] = "SKIP"
+    except Exception as _be:
+        logger.debug("[Scanner] Brain gate skipped: %s", _be)
+    return picks
+
+
 class UniverseScanner:
     """Fast NSE universe scanner — 200+ stocks in < 15 seconds."""
 
@@ -552,7 +645,7 @@ class UniverseScanner:
             self._scan_progress["status"] = "scoring"
             self._scan_progress["scanned"] = len(indicators)
 
-            # ── Step 2: Score each stock ──────────────────────────────────────
+            # ── Step 2: Score + Diversity + Brain Gate ───────────────────────
             results: List[Dict] = []
             for stock in universe:
                 t = stock["t"]
@@ -561,14 +654,18 @@ class UniverseScanner:
                 if result and result["confidence"] >= min_confidence:
                     results.append(result)
 
-            # Sort
-            results.sort(key=lambda x: x["confidence"], reverse=True)
+            # B. Apply diversity + noise (sector cap + ±12% noise)
+            buys_raw  = [r for r in results if r["action"] == "BUY"]
+            sells_raw = [r for r in results if r["action"] == "SELL"]
+            buys  = _diversify_with_noise(buys_raw,  top_n)
+            sells = _diversify_with_noise(sells_raw, top_n)
 
-            buys  = [r for r in results if r["action"] == "BUY"][:top_n]
-            sells = [r for r in results if r["action"] == "SELL"][:top_n]
+            # A. HybridSuperBrain gate — validate top picks
+            buys  = _brain_gate_top_picks(buys)
+            sells = _brain_gate_top_picks(sells)
 
             scan_time = round(time.time() - t0, 2)
-            self._last_results = results
+            self._last_results = buys + sells
             self._last_scan_ts = time.time()
             self._scan_progress = {
                 "scanned": len(indicators),
@@ -577,7 +674,7 @@ class UniverseScanner:
             }
 
             logger.info(
-                "[Scanner] Done: %d stocks → %d BUY + %d SELL in %.1fs",
+                "[Scanner] Done: %d stocks → %d BUY + %d SELL in %.1fs (diversity+noise+brain_gate applied)",
                 len(indicators), len(buys), len(sells), scan_time,
             )
 

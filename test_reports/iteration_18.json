@@ -1,0 +1,44 @@
+{
+  "summary": "Backend-only testing of three brain improvements: A) HybridSuperBrain Brain Gate (_brain_gate_top_picks), B) Diversity+Randomness (danger scanner max-2/sector, universe scanner max-3/sector + ±12% noise), C) Dynamic Confidence Threshold (ATR-based scaling). 37/37 tests pass including health endpoint. One minor docstring discrepancy found.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "agents/trading_loop.py _dynamic_conf_threshold()",
+        "issue": "Docstring example claims ATR%=5.5 → threshold=76 (capped), but the actual formula gives 74: extra=min(18,(5.5-1.5)*4)=min(18,16)=16, threshold=58+16=74. To reach 76 (cap), ATR% must be ≥6.0%. The code itself is correct and monotonic; only the docstring example is misleading.",
+        "priority": "LOW"
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_brain_improvements.py",
+    "/app/test_reports/pytest/pytest_brain_improvements.xml"
+  ],
+  "action_items": [
+    "Fix docstring in trading_loop.py _dynamic_conf_threshold(): ATR%=5.5 → threshold=74, not 76. Change example line to: 'ATR%=5.5 (extreme) → threshold=74' and 'ATR%=6.0 (extreme) → threshold=76 (capped)'"
+  ],
+  "critical_code_review_comments": [
+    "_dynamic_conf_threshold(): docstring example says ATR%=5.5→76(capped) but formula gives 74. Cap (76) is hit at ATR%≥6.0.",
+    "_brain_gate_top_picks(): silent outer exception catch (except Exception as _be) means if hybrid_brain import fails ALL picks get no brain_gate annotation — they keep SKIP from the inner per-pick exception only if that branch reaches the inner try. Actually, if the outer try fails before the inner loop, picks[0..14] would get no brain_gate at all. Code is safe because inner per-pick try adds SKIP on exception, and if outer fails before loop all picks remain unmodified (no brain_gate). Add a fallback in outer except to explicitly set brain_gate='SKIP' for all picks.",
+    "danger_scanner.py _apply_diversity_and_noise(): modifies input list in-place (adds 'noisy_score' key and re-sorts). Callers that rely on original order or original dict contents could be affected. Consider working on a copy."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_brain_improvements.py"
+  ],
+  "success_rate": {
+    "backend": "37/37 (100%)",
+    "frontend": "Not tested (backend-only task)"
+  },
+  "seed_data_creation": "None — all tests use in-process mock data",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "All three brain improvements validated: A) _brain_gate_top_picks() adds brain_gate=PASS/WARN/SKIP to each pick (actual brain returns WARN for tested pick, SKIP when brain unavailable). B) danger_scanner max-2/sector confirmed with 4+ Banking mock entries. C) _dynamic_conf_threshold() monotonic ATR-based scaling confirmed (1.5→58, 2.5→62, 3.5→66, 5.5→74, 6.0→76). Test file: /app/backend/tests/test_brain_improvements.py (37 tests). Docstring for 5.5% says 76 but code correctly returns 74. Previous iteration: /app/test_reports/iteration_17.json (index-intraday endpoint tests).",
+  "rca_of_the_issue": {
+    "docstring_discrepancy": "In trading_loop.py, the _dynamic_conf_threshold docstring example states 'ATR%=5.5 (extreme) → threshold=76 (capped)'. The formula is: extra = min(18, max(0, (avg_atr - 1.5) * 4)). For avg_atr=5.5: (5.5-1.5)*4=16, min(18,16)=16, threshold=58+16=74, min(76,74)=74. To reach the cap of 76, ATR must be ≥6.0: (6.0-1.5)*4=18. Fix: update docstring example for 5.5% from 76 to 74, and add a 6.0% example showing 76(capped)."
+  }
+}
