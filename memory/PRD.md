@@ -186,7 +186,29 @@ Clone trading app → Add dark/light mode, mobile responsiveness, MiroFish LangG
 - Click OFF → clears VP, hides canvas
 - No longer auto-activates on stock selection (manual control like PATTERNS/EMA)
 
-### NIFTY Options Click → Chart Load Fixed (July 2026)
+
+## Update (July 2026) — HybridSuperBrain Priority Improvements
+
+### A. HybridSuperBrain as Truly Central
+- Universe scanner now runs `_brain_gate_top_picks()` on top 15 results before returning
+- Each scan pick gets `brain_gate: 'PASS'|'WARN'|'SKIP'`, `brain_action`, `brain_conf`, `brain_fear`
+- Danger scanner feeds into trading loop → Brain validates each ticker via `decide_sync()` (already central)
+
+### B. Diversity + Randomness
+- `danger_scanner.py`: Added `_apply_diversity_and_noise()` — ±12% score noise + max 2 picks/sector
+- `universe_scanner.py`: Added `_diversify_with_noise()` — ±12% confidence noise + max 3 picks/sector
+- Sector mapping covers Banking, IT, Energy, Pharma, Metals, Auto, NBFC, FMCG, Infra, Power, Telecom
+- Result: scanner returns diverse sectors instead of always top Banking/IT stocks
+
+### C. Dynamic Confidence Threshold
+- `trading_loop.py`: Added `_dynamic_conf_threshold(watchlist_obs)` function
+- Uses average ATR% across all observed tickers as VIX proxy
+- Formula: `threshold = clamp(58 + (avg_atr% - 1.5) * 4, 48, 76)`
+- Normal market (VIX~15, ATR~1.5%) → threshold=58 | High vol (VIX~20, ATR~2.5%) → 62 | Extreme (ATR~6%) → 76
+- Logged each cycle: `Dynamic conf threshold = {N} (from avg ATR of {M} tickers)`
+- Replaces hardcoded `confidence <= 58` check in execution loop
+
+
 - New endpoint `/api/option/index-intraday` — synthesizes NIFTY/BANKNIFTY/FINNIFTY/MIDCPNIFTY option intraday bars
   using yfinance spot (^NSEI, ^NSEBANK, ^CNXFIN) + India VIX + Black-Scholes (same as /option/sensex-intraday)
 - Returns 120 × 5-min bars per option, is_live_derived=true

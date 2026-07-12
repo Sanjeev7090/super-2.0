@@ -99,7 +99,8 @@ def _dynamic_conf_threshold(watchlist_obs: Dict[str, Dict]) -> int:
         ATR%=1.5% (VIX~15)  → threshold=58
         ATR%=2.5% (VIX~20)  → threshold=62
         ATR%=3.5% (VIX~25)  → threshold=66
-        ATR%=5.5% (extreme) → threshold=76 (capped)
+        ATR%=5.5% (extreme) → threshold=74
+        ATR%=6.0% (extreme) → threshold=76 (capped)
     """
     if not watchlist_obs:
         return 58  # default
