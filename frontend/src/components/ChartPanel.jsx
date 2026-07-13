@@ -789,9 +789,10 @@ const ChartPanel = ({
     ctx.scale(dpr, dpr);
     ctx.clearRect(0, 0, W, H);
 
-    const ts  = chart.timeScale();
+    let ts;
+    try { ts = chart.timeScale(); } catch (e) { ctx.restore(); chartRef.current = null; return; }
     const toX = t  => { try { return ts.timeToCoordinate(t); } catch { return null; } };
-    const toY = p  => series.priceToCoordinate(p);
+    const toY = p  => { try { return series.priceToCoordinate(p); } catch { return null; } };
 
     // ── 0a. Wyckoff Phases (ACC / DIST) — deepest background ──────
     (smc.wyckoffPhases || []).forEach(phase => {
@@ -1384,25 +1385,27 @@ const ChartPanel = ({
   }, []);
 
   useEffect(() => {
-    if (chartRef.current) chartRef.current.applyOptions({ rightPriceScale: { mode: semiLogScale ? 2 : 0 } });
+    if (chartRef.current) try { chartRef.current.applyOptions({ rightPriceScale: { mode: semiLogScale ? 2 : 0 } }); } catch (e) {}
   }, [semiLogScale]);
 
   // Update chart colors when theme changes
   useEffect(() => {
     if (!chartRef.current) return;
     const isDark = theme === 'dark';
-    chartRef.current.applyOptions({
-      layout: {
-        background: { color: isDark ? '#0A0A0A' : '#FFFFFF' },
-        textColor: isDark ? '#52525B' : '#64748B',
-      },
-      grid: {
-        vertLines: { color: isDark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.04)' },
-        horzLines: { color: isDark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.04)' },
-      },
-      rightPriceScale: { borderColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.1)' },
-      timeScale: { borderColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.1)' },
-    });
+    try {
+      chartRef.current.applyOptions({
+        layout: {
+          background: { color: isDark ? '#0A0A0A' : '#FFFFFF' },
+          textColor: isDark ? '#52525B' : '#64748B',
+        },
+        grid: {
+          vertLines: { color: isDark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.04)' },
+          horzLines: { color: isDark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.04)' },
+        },
+        rightPriceScale: { borderColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.1)' },
+        timeScale: { borderColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.1)' },
+      });
+    } catch (e) { /* chart may be disposed */ }
   }, [theme]);
 
   useEffect(() => {
@@ -1419,7 +1422,7 @@ const ChartPanel = ({
       return base;
     });
     candlestickSeriesRef.current.setData(chartData);
-    chartRef.current.timeScale().fitContent();
+    try { chartRef.current.timeScale().fitContent(); } catch (e) { /* chart may be disposed */ }
 
     // Track most recent pattern hit for on-chart badge
     let recent = null;
@@ -1469,8 +1472,10 @@ const ChartPanel = ({
 
   // ── EMA: toggle visibility ─────────────────────────────────────
   useEffect(() => {
-    if (ema9SeriesRef.current)  ema9SeriesRef.current.applyOptions({  visible: emaActive });
-    if (ema21SeriesRef.current) ema21SeriesRef.current.applyOptions({ visible: emaActive });
+    try {
+      if (ema9SeriesRef.current)  ema9SeriesRef.current.applyOptions({  visible: emaActive });
+      if (ema21SeriesRef.current) ema21SeriesRef.current.applyOptions({ visible: emaActive });
+    } catch (e) { /* series may be disposed */ }
   }, [emaActive]);
 
   // ── Parity Trade Signal Lines (Buy/Sell/SL/Target) ────────────
@@ -1639,7 +1644,7 @@ const ChartPanel = ({
 
   useEffect(() => {
     if (!chartRef.current) return;
-    chartRef.current.subscribeClick(handleChartClick);
+    try { chartRef.current.subscribeClick(handleChartClick); } catch (e) {}
     return () => { if (chartRef.current) { try { chartRef.current.unsubscribeClick(handleChartClick); } catch (e) {} } };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectMode, stockData, isMovingMode, pivotPoint]);
@@ -1680,10 +1685,12 @@ const ChartPanel = ({
   useEffect(() => {
     const t = setTimeout(() => {
       if (chartRef.current && chartContainerRef.current) {
-        chartRef.current.applyOptions({
-          width:  chartContainerRef.current.clientWidth,
-          height: chartContainerRef.current.clientHeight,
-        });
+        try {
+          chartRef.current.applyOptions({
+            width:  chartContainerRef.current.clientWidth,
+            height: chartContainerRef.current.clientHeight,
+          });
+        } catch (e) { /* chart may be disposed */ }
       }
     }, 60);
     return () => clearTimeout(t);
