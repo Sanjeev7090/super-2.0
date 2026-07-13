@@ -2291,6 +2291,416 @@ async def get_nse_index_option_intraday(
     return result
 
 
+@api_router.get("/option-chain/equity/{symbol}")
+async def get_equity_option_chain(
+    symbol: str,
+    expiry: Optional[str] = Query(None, description="DD-Mon-YYYY expiry (e.g. '31-Jul-2026')"),
+):
+    """Full paired option chain (Call+Put by strike) for NSE equity stocks.
+    Primary: NSE live API. Fallback: Black-Scholes with stock historical volatility.
+    Returns: {symbol, underlying_price, nearest_expiry, all_expiries, atm_strike, chain: [{strike, call, put}], is_live_derived}
+    """
+    import math
+
+    sym = symbol.upper().replace(".NS", "").replace(".BO", "")
+
+    cache_key = f"eq_option_chain_{sym}_{expiry or 'auto'}"
+    if cache_key in cache_storage:
+        cached_data, cached_time = cache_storage[cache_key]
+        if (datetime.now() - cached_time).seconds < 90:
+            return cached_data
+
+    # ── Try live NSE option chain ──────────────────────────────────────
+    live_chain = []
+    underlying_price = 0.0
+    nearest_expiry = None
+    all_expiries: list = []
+    is_live = False
+
+    try:
+        import asyncio as _asyncio
+        oi_data = await _asyncio.wait_for(
+            _asyncio.to_thread(_fetch_nse_option_chain, sym, expiry),
+            timeout=8.0,
+        )
+        if oi_data and oi_data.get("records", {}).get("data"):
+            rows, underlying_price, nearest_expiry, all_expiries = _extract_option_rows(oi_data, sym, nearest_only=True)
+            if rows:
+                live_chain = rows
+                is_live = True
+    except Exception as e:
+        logging.warning(f"NSE equity chain fetch for {sym} failed: {e}")
+
+    # ── BS fallback when NSE is blocked/empty ─────────────────────────
+    if not live_chain:
+        logging.info(f"Equity option chain for {sym} — using BS-derived fallback")
+        try:
+            # Try multiple approaches for spot price
+            spot_ticker = yf.Ticker(f"{sym}.NS")
+            # Try fast_info first (faster)
+            try:
+                fi = spot_ticker.fast_info
+                price_val = getattr(fi, "last_price", None) or getattr(fi, "lastPrice", None)
+                if price_val and float(price_val) > 0:
+                    underlying_price = float(price_val)
+                else:
+                    raise ValueError("fast_info price 0")
+            except Exception:
+                hist = spot_ticker.history(period="5d", interval="1d")
+                if hist.empty:
+                    raise ValueError("Empty history")
+                underlying_price = float(hist["Close"].iloc[-1])
+            # Compute historical vol separately
+            try:
+                hist_vol = spot_ticker.history(period="60d", interval="1d")
+                rets = hist_vol["Close"].pct_change().dropna()
+                sigma = float(rets.std() * math.sqrt(252)) if len(rets) > 5 else 0.25
+                sigma = max(0.10, min(sigma, 1.5))
+            except Exception:
+                sigma = 0.25
+        except Exception as e:
+            logging.warning(f"yfinance fallback for {sym} failed: {e}")
+            underlying_price = 0.0
+            sigma = 0.25
+
+        if underlying_price <= 0:
+            return {
+                "symbol": sym, "underlying_price": 0, "nearest_expiry": None,
+                "all_expiries": [], "atm_strike": 0, "chain": [],
+                "max_call_oi": 1, "max_put_oi": 1, "is_live_derived": True,
+                "note": f"Price unavailable for {sym} — NSE and yfinance both failed",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+        # Nearest monthly expiry (last Thursday of month) for NSE equity options
+        import calendar as _cal
+        from datetime import date as _d, timedelta as _td
+        today = _d.today()
+        exp_months = []
+        for m_offset in range(5):
+            raw_m = today.month + m_offset
+            y = today.year + (raw_m - 1) // 12
+            m = ((raw_m - 1) % 12) + 1
+            _, days_in_month = _cal.monthrange(y, m)
+            last_thu = None
+            for d in range(days_in_month, 0, -1):
+                if _d(y, m, d).weekday() == 3:
+                    last_thu = _d(y, m, d)
+                    break
+            if last_thu and last_thu >= today:
+                exp_months.append(last_thu.strftime("%d-%b-%Y"))
+
+        if not exp_months:
+            exp_months = [(today + _td(days=30)).strftime("%d-%b-%Y")]
+
+        nearest_expiry = expiry if expiry else exp_months[0]
+        all_expiries = exp_months[:4]
+
+        # Strike interval based on stock price
+        if underlying_price > 5000:
+            interval = 100
+        elif underlying_price > 2000:
+            interval = 50
+        elif underlying_price > 1000:
+            interval = 25
+        elif underlying_price > 500:
+            interval = 10
+        elif underlying_price > 100:
+            interval = 5
+        else:
+            interval = 2
+
+        try:
+            exp_obj = datetime.strptime(nearest_expiry, "%d-%b-%Y")
+            T = max((exp_obj.date() - today).days / 365.0, 1 / 365)
+        except Exception:
+            T = 30 / 365
+
+        r_rate = 0.065
+
+        def _ncdf(x):
+            return 0.5 * (1 + math.erf(x / math.sqrt(2)))
+
+        def bs_price(S, K, T, r, sig, is_call):
+            if T <= 0 or S <= 0 or K <= 0 or sig <= 0:
+                return 0.0
+            d1 = (math.log(S / K) + (r + 0.5 * sig ** 2) * T) / (sig * math.sqrt(T))
+            d2 = d1 - sig * math.sqrt(T)
+            if is_call:
+                return max(0.0, S * _ncdf(d1) - K * math.exp(-r * T) * _ncdf(d2))
+            return max(0.0, K * math.exp(-r * T) * _ncdf(-d2) - S * _ncdf(-d1))
+
+        atm = round(underlying_price / interval) * interval
+        strikes = [atm + i * interval for i in range(-10, 11)]
+
+        for k in strikes:
+            if k <= 0:
+                continue
+            moneyness = abs(underlying_price - k) / max(underlying_price, 1)
+            base_oi  = max(1000, int(500000 * math.exp(-15 * moneyness)))
+            base_vol = max(100,  int(50000  * math.exp(-12 * moneyness)))
+            iv_call = sigma * (1 + 0.05 * max(0, (k - underlying_price) / max(underlying_price, 1) * 10))
+            iv_put  = sigma * (1 + 0.10 * max(0, (underlying_price - k) / max(underlying_price, 1) * 10))
+            cp = bs_price(underlying_price, k, T, r_rate, iv_call, True)
+            pp = bs_price(underlying_price, k, T, r_rate, iv_put, False)
+
+            if cp > 0.01:
+                live_chain.append({
+                    "instrument": f"{sym} {int(k)} Call",
+                    "underlying": sym, "strike": float(k), "type": "CE",
+                    "expiry": nearest_expiry, "expiry_display": nearest_expiry,
+                    "last_price": round(cp, 2), "change_pct": 0.0,
+                    "volume": base_vol, "oi": base_oi,
+                    "iv": round(iv_call * 100, 1),
+                    "is_live_derived": True,
+                })
+            if pp > 0.01:
+                live_chain.append({
+                    "instrument": f"{sym} {int(k)} Put",
+                    "underlying": sym, "strike": float(k), "type": "PE",
+                    "expiry": nearest_expiry, "expiry_display": nearest_expiry,
+                    "last_price": round(pp, 2), "change_pct": 0.0,
+                    "volume": int(base_vol * 1.1), "oi": int(base_oi * 1.1),
+                    "iv": round(iv_put * 100, 1),
+                    "is_live_derived": True,
+                })
+
+    # ── Pair by strike: {strike, call, put} ───────────────────────────
+    strike_map: dict = {}
+    for opt in live_chain:
+        k = float(opt["strike"])
+        if k not in strike_map:
+            strike_map[k] = {"strike": k, "call": None, "put": None}
+        if opt["type"] == "CE":
+            strike_map[k]["call"] = {
+                "last_price": opt["last_price"],
+                "change_pct": opt.get("change_pct", 0),
+                "oi": opt.get("oi", 0),
+                "volume": opt.get("volume", 0),
+                "iv": opt.get("iv", 0),
+                "instrument": opt["instrument"],
+                "expiry": opt.get("expiry_display") or opt.get("expiry", ""),
+                "is_live_derived": opt.get("is_live_derived", False),
+            }
+        else:
+            strike_map[k]["put"] = {
+                "last_price": opt["last_price"],
+                "change_pct": opt.get("change_pct", 0),
+                "oi": opt.get("oi", 0),
+                "volume": opt.get("volume", 0),
+                "iv": opt.get("iv", 0),
+                "instrument": opt["instrument"],
+                "expiry": opt.get("expiry_display") or opt.get("expiry", ""),
+                "is_live_derived": opt.get("is_live_derived", False),
+            }
+
+    chain = sorted(strike_map.values(), key=lambda x: x["strike"])
+
+    # Compute ATM strike
+    if underlying_price > 0 and chain:
+        atm_strike = min([row["strike"] for row in chain], key=lambda k: abs(k - underlying_price))
+    else:
+        atm_strike = chain[len(chain) // 2]["strike"] if chain else 0
+
+    # Max OI for bar normalization
+    max_call_oi = max((row["call"]["oi"] for row in chain if row["call"]), default=1) or 1
+    max_put_oi  = max((row["put"]["oi"]  for row in chain if row["put"]),  default=1) or 1
+
+    result = {
+        "symbol": sym,
+        "underlying_price": round(underlying_price, 2),
+        "nearest_expiry": nearest_expiry,
+        "all_expiries": all_expiries,
+        "atm_strike": atm_strike,
+        "chain": chain,
+        "max_call_oi": max_call_oi,
+        "max_put_oi": max_put_oi,
+        "is_live_derived": not is_live,
+        "note": "NSE live data" if is_live else f"BS-derived: spot=₹{underlying_price:.0f}",
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    cache_storage[cache_key] = (result, datetime.now())
+    return result
+
+
+@api_router.get("/option/equity-intraday")
+async def get_equity_option_intraday(
+    underlying: str = Query(..., description="NSE equity symbol (e.g., RELIANCE)"),
+    strike: float = Query(...),
+    option_type: str = Query(..., pattern="^(CE|PE|ce|pe)$"),
+    expiry: str = Query(..., description="DD-Mon-YYYY"),
+    interval_min: int = Query(5, ge=1, le=15),
+):
+    """Black-Scholes synthesized intraday bars for NSE equity stock options.
+    Uses yfinance for underlying spot bars + stock historical volatility.
+    """
+    import math
+
+    sym = underlying.upper().replace(".NS", "").replace(".BO", "")
+    opt = option_type.upper()
+    if opt not in ("CE", "PE"):
+        raise HTTPException(400, "option_type must be CE or PE")
+
+    try:
+        exp_obj = datetime.strptime(expiry, "%d-%b-%Y")
+    except ValueError:
+        try:
+            exp_obj = datetime.strptime(expiry, "%d-%m-%Y")
+        except ValueError:
+            raise HTTPException(400, f"Invalid expiry format: {expiry}")
+    expiry_display = exp_obj.strftime("%d-%b-%Y")
+
+    cache_key = f"eq_opt_intra_{sym}_{int(strike)}_{opt}_{expiry_display}_{interval_min}"
+    if cache_key in cache_storage:
+        cached_data, cached_time = cache_storage[cache_key]
+        if (datetime.now() - cached_time).seconds < 30:
+            return cached_data
+
+    # Try NSE chart-databyindex with OPTSTK prefix first
+    try:
+        exp_dmy = exp_obj.strftime("%d-%m-%Y")
+        strike_str = f"{float(strike):.2f}"
+        index_param = f"OPTSTK{sym}{exp_dmy}{opt}{strike_str}"
+        s = _get_nse_session()
+        url = f"https://www.nseindia.com/api/chart-databyindex?index={index_param}"
+        r = s.get(url, timeout=10)
+        if r.status_code == 200 and len(r.content) > 200:
+            d = r.json()
+            pts = d.get("grapthData") or []
+            if pts:
+                bucket_sec = interval_min * 60
+                bars_dict: dict = {}
+                for tick in pts:
+                    try:
+                        t_ms, price = tick[0], float(tick[1])
+                        ts_b = (int(t_ms / 1000) // bucket_sec) * bucket_sec
+                        if ts_b not in bars_dict:
+                            bars_dict[ts_b] = {"timestamp": ts_b, "open": price, "high": price, "low": price, "close": price, "volume": 0}
+                        else:
+                            b = bars_dict[ts_b]
+                            if price > b["high"]: b["high"] = price
+                            if price < b["low"]:  b["low"]  = price
+                            b["close"] = price
+                    except Exception:
+                        continue
+                if bars_dict:
+                    bars = [bars_dict[k] for k in sorted(bars_dict.keys())]
+                    label = "Call" if opt == "CE" else "Put"
+                    result = {
+                        "ticker": index_param,
+                        "instrument": f"{sym} {int(strike)} {label}",
+                        "underlying": sym, "strike": float(strike), "type": opt,
+                        "expiry": expiry_display, "interval_min": interval_min,
+                        "bars": bars, "is_live_derived": False,
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                    cache_storage[cache_key] = (result, datetime.now())
+                    return result
+    except Exception as e:
+        logging.warning(f"NSE equity option intraday failed for {sym}: {e}")
+
+    # ── BS fallback using stock spot bars + historical vol ──────────────
+    yf_ticker = f"{sym}.NS"
+    interval_yf_map = {1: "1m", 2: "2m", 5: "5m", 15: "15m"}
+    yf_interval = interval_yf_map.get(interval_min, "5m")
+    period = "7d" if yf_interval == "1m" else "60d"
+
+    try:
+        spot_ticker = yf.Ticker(yf_ticker)
+        hist_intra = spot_ticker.history(period=period, interval=yf_interval)
+    except Exception as e:
+        raise HTTPException(502, f"Failed to fetch {sym} spot bars: {e}")
+
+    if hist_intra is None or hist_intra.empty:
+        raise HTTPException(404, f"No intraday data for {sym}")
+
+    # Compute historical vol from daily bars for sigma
+    try:
+        hist_daily = yf.Ticker(yf_ticker).history(period="90d", interval="1d")
+        rets = hist_daily["Close"].pct_change().dropna()
+        sigma = float(rets.std() * math.sqrt(252)) if len(rets) > 5 else 0.25
+        sigma = max(0.10, min(sigma, 1.5))
+    except Exception:
+        sigma = 0.25
+
+    hist_intra = hist_intra.tail(120)
+    K = float(strike)
+    is_call = (opt == "CE")
+    r_rate = 0.065
+
+    def _ncdf(x):
+        return 0.5 * (1 + math.erf(x / math.sqrt(2)))
+
+    def bs(S, K, T, r, sig, call):
+        if T <= 0 or S <= 0 or K <= 0 or sig <= 0:
+            return 0.0
+        try:
+            d1 = (math.log(S / K) + (r + 0.5 * sig ** 2) * T) / (sig * math.sqrt(T))
+            d2 = d1 - sig * math.sqrt(T)
+            if call:
+                return max(0.0, S * _ncdf(d1) - K * math.exp(-r * T) * _ncdf(d2))
+            return max(0.0, K * math.exp(-r * T) * _ncdf(-d2) - S * _ncdf(-d1))
+        except Exception:
+            return 0.0
+
+    bars = []
+    for ts_idx, row in hist_intra.iterrows():
+        try:
+            o_s = float(row["Open"]); h_s = float(row["High"])
+            l_s = float(row["Low"]);  c_s = float(row["Close"])
+        except Exception:
+            continue
+        if not all([o_s, h_s, l_s, c_s]):
+            continue
+        try:
+            bar_dt = ts_idx.to_pydatetime() if hasattr(ts_idx, "to_pydatetime") else ts_idx
+            bar_date = bar_dt.date() if hasattr(bar_dt, "date") else exp_obj.date()
+        except Exception:
+            bar_date = exp_obj.date()
+        T_bar = max((exp_obj.date() - bar_date).days / 365.0, 1 / 365)
+
+        if is_call:
+            iv = sigma * (1 + 0.05 * max(0, (K - c_s) / max(c_s, 1) * 10))
+            o = bs(o_s, K, T_bar, r_rate, iv, True)
+            c = bs(c_s, K, T_bar, r_rate, iv, True)
+            hi = bs(h_s, K, T_bar, r_rate, iv, True)
+            lo = bs(l_s, K, T_bar, r_rate, iv, True)
+        else:
+            iv = sigma * (1 + 0.10 * max(0, (c_s - K) / max(c_s, 1) * 10))
+            o = bs(o_s, K, T_bar, r_rate, iv, False)
+            c = bs(c_s, K, T_bar, r_rate, iv, False)
+            hi = bs(l_s, K, T_bar, r_rate, iv, False)
+            lo = bs(h_s, K, T_bar, r_rate, iv, False)
+
+        try:
+            ts_sec = int(bar_dt.timestamp())
+        except Exception:
+            continue
+        if max(o, hi, lo, c) < 0.01:
+            continue
+        bars.append({
+            "timestamp": ts_sec,
+            "open": round(o, 2), "high": round(hi, 2),
+            "low": round(lo, 2), "close": round(c, 2), "volume": 0,
+        })
+
+    if not bars:
+        raise HTTPException(404, f"Could not synthesize {sym} option bars — check strike/expiry")
+
+    label = "Call" if is_call else "Put"
+    result = {
+        "ticker": f"{sym}{int(K)}{opt}_{expiry_display}",
+        "instrument": f"{sym} {int(K)} {label}",
+        "underlying": sym, "strike": K, "type": opt,
+        "expiry": expiry_display, "interval_min": interval_min,
+        "bars": bars, "is_live_derived": True,
+        "note": f"BS-synthesized · {sym} spot · hist vol {sigma*100:.0f}%",
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    cache_storage[cache_key] = (result, datetime.now())
+    return result
+
+
 @api_router.post("/gann/fan", response_model=GannFanResponse)
 async def calculate_gann_fan(request: GannFanRequest):
     """Calculate Gann Fan angles from a pivot point"""

@@ -508,7 +508,8 @@ function computeSMCData(bars) {
 const ChartPanel = ({
   stockData, loading, selectedStock, onPivotSelect, pivotPoint, gannFan,
   semiLogScale, setSemiLogScale, timeframe, onTimeframeChange, isCrypto,
-  dataSource, onDataSourceChange, activeStrategy, strategyData, tradeSignal
+  dataSource, onDataSourceChange, activeStrategy, strategyData, tradeSignal,
+  onOpenOptionChain,
 }) => {
   const chartContainerRef = useRef();
   const chartRef = useRef(null);
@@ -1941,6 +1942,17 @@ const ChartPanel = ({
                 <Lightning size={11} weight="fill" />
                 TRADE
               </button>
+              {/* Option Chain button — small red circle */}
+              {selectedStock?.type !== 'OPTION' && onOpenOptionChain && (
+                <button
+                  onClick={() => onOpenOptionChain({ symbol: (selectedStock?.ticker || '').replace('.NS','').replace('.BO','').replace(/^\^/,''), name: selectedStock?.name })}
+                  className="w-6 h-6 flex items-center justify-center rounded-full bg-[#FF3B30] hover:bg-[#FF5B53] active:bg-[#CC2F25] shadow-md shadow-red-900/50 transition-all shrink-0 ml-1"
+                  data-testid="option-chain-btn"
+                  title="Open Option Chain"
+                >
+                  <span className="text-[8px] font-black text-white leading-none">OC</span>
+                </button>
+              )}
             </>
           )}
         </div>

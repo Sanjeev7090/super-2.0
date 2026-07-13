@@ -4,7 +4,7 @@ import pytest
 import requests
 import time
 
-BASE_URL = os.environ.get('REACT_APP_BACKEND_URL', 'https://algo-market-view.preview.emergentagent.com').rstrip('/')
+BASE_URL = os.environ.get('REACT_APP_BACKEND_URL', 'https://intelligent-trader-24.preview.emergentagent.com').rstrip('/')
 
 
 @pytest.fixture(scope="module")

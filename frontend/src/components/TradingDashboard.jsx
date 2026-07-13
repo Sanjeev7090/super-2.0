@@ -50,6 +50,7 @@ import AIRouterPanel from './AIRouterPanel';
 import GrowwPortfolio from './GrowwPortfolio';
 import IndicesTickerBar from './IndicesTickerBar';
 import TopOptionsSheet from './TopOptionsSheet';
+import OptionChainModal from './OptionChainModal';
 import PutCallParityScanner from './PutCallParityScanner';
 import DeltaDashScoreboard from './DeltaDashScoreboard';
 import HybridBrainPanel from './HybridBrainPanel';
@@ -127,6 +128,7 @@ const TradingDashboard = () => {
   const [showNews, setShowNews] = useState(false);
   const [dataSource, setDataSource] = useState('groww'); // 'yahoo' | 'groww'
   const [optionsSheet, setOptionsSheet] = useState(null); // { symbol, name } | null
+  const [showOptionChain, setShowOptionChain] = useState(null); // { symbol, name } | null
   const [activeStrategy, setActiveStrategy] = useState(null); // Strategy type for overlay
   const [strategyData, setStrategyData] = useState(null); // Strategy analysis data
   const [pendingPaperTrade, setPendingPaperTrade] = useState(null); // Paper trade from scanner/strategy
@@ -408,12 +410,22 @@ const TradingDashboard = () => {
     try {
       const expiry = option.expiry_display || option.expiry;
       const isSensex = option.underlying === 'SENSEX' || option.is_indicative;
-      const isNseIndexDerived = option.is_live_derived && !isSensex;
+      const isNseIndexDerived = option.is_live_derived && !isSensex && !option.is_equity;
+      const isEquity = option.is_equity === true;
 
       let url, params;
       if (isSensex) {
         url = `${API}/option/sensex-intraday`;
         params = {
+          strike: option.strike,
+          option_type: option.type,
+          expiry,
+          interval_min: Math.max(intervalMin, 5),
+        };
+      } else if (isEquity) {
+        url = `${API}/option/equity-intraday`;
+        params = {
+          underlying: option.underlying,
           strike: option.strike,
           option_type: option.type,
           expiry,
@@ -454,7 +466,7 @@ const TradingDashboard = () => {
   const handleOptionSelect = (option) => {
     const expiryNorm = option.expiry_display || option.expiry || '';
     const isSensex = option.underlying === 'SENSEX' || option.is_indicative;
-    const isNseIndexDerived = option.is_live_derived && !isSensex;
+    const isNseIndexDerived = option.is_live_derived && !isSensex && !option.is_equity;
 
     const stock = {
       ticker: isSensex
@@ -470,6 +482,7 @@ const TradingDashboard = () => {
       change_pct: option.change_pct,
       selectedOption: option,
       is_live_derived: option.is_live_derived || false,
+      is_equity: option.is_equity || false,
     };
     setStockData(null);
     setPivotPoint(null);
@@ -477,11 +490,12 @@ const TradingDashboard = () => {
     setSignal(null);
     setSelectedStock(stock);
     setOptionsSheet(null);
+    setShowOptionChain(null);
     const optTf = { multiplier: 5, timespan: 'minute', label: '5M' };
     setTimeframe(optTf);
     fetchOptionIntraday(option, 5);
     setMobilePanel('chart');
-    const derivedTag = (isSensex || isNseIndexDerived) ? ' · BS-Derived' : '';
+    const derivedTag = (isSensex || isNseIndexDerived || option.is_equity) ? ' · BS-Derived' : '';
     const desc = `₹${option.last_price.toFixed(2)} (${option.change_pct >= 0 ? '+' : ''}${option.change_pct.toFixed(2)}%) · Exp ${expiryNorm}${derivedTag}`;
     toast.success(`${option.instrument} chart loaded`, { description: desc });
   };
@@ -861,6 +875,7 @@ const TradingDashboard = () => {
               activeStrategy={activeStrategy}
               strategyData={strategyData}
               tradeSignal={parityTradeSignal}
+              onOpenOptionChain={(info) => setShowOptionChain(info)}
             />
           </div>
           {/* Footprint Panel — below chart, auto-fetches when stock loaded */}
@@ -1071,6 +1086,16 @@ const TradingDashboard = () => {
           symbol={optionsSheet.symbol}
           name={optionsSheet.name}
           onClose={() => setOptionsSheet(null)}
+          onOptionSelect={handleOptionSelect}
+        />
+      )}
+
+      {/* Equity Option Chain Modal (opens via red OC button on chart) */}
+      {showOptionChain && (
+        <OptionChainModal
+          symbol={showOptionChain.symbol}
+          name={showOptionChain.name}
+          onClose={() => setShowOptionChain(null)}
           onOptionSelect={handleOptionSelect}
         />
       )}
