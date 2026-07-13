@@ -6,7 +6,17 @@ import sys
 
 from tqdm import trange
 
-from .module import *
+import torch.nn as nn
+import torch.nn.functional as F
+from .module import (  # noqa: F401
+    BSQuantizer,
+    DependencyAwareLayer,
+    DualHead,
+    HierarchicalEmbedding,
+    RMSNorm,
+    TemporalEmbedding,
+    TransformerBlock,
+)
 
 
 class KronosTokenizer(nn.Module, PyTorchModelHubMixin):

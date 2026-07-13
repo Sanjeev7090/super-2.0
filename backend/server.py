@@ -7779,7 +7779,7 @@ async def auto_scan_ticker(ticker: str):
                 avg_range = max(current * 0.005, min(avg_range, current * 0.04))
                 target = current + avg_range if direction == "BUY" else current - avg_range
                 return json_safe_float(target)
-            except:
+            except Exception:
                 # Fallback: 1.5% move
                 return json_safe_float(current * 1.015 if direction == "BUY" else current * 0.985)
 

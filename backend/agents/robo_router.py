@@ -1357,7 +1357,6 @@ def _momentum_score_stock(meta: dict) -> Optional[dict]:
       • 20 pts: Trend           — EMA9 > EMA21 > EMA50
       • 10 pts: RSI sweet spot  — 45-70 = max 10 pts
     """
-    import math
     import yfinance as yf
 
     def _safe(v):
