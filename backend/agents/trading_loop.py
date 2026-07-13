@@ -141,16 +141,16 @@ def _dynamic_conf_threshold(watchlist_obs: Dict[str, Dict]) -> int:
         ATR%=6.0% (extreme) → threshold=76 (capped)
     """
     if not watchlist_obs:
-        return 58  # default
+        return 42  # default
 
     atrs = [v.get("atr_pct", 1.5) for v in watchlist_obs.values() if v.get("atr_pct")]
     if not atrs:
         return 58
 
     avg_atr = sum(atrs) / len(atrs)   # already in % (e.g. 1.5 = 1.5%)
-    extra   = min(18, max(0, (avg_atr - 1.5) * 4))
-    threshold = int(58 + extra)
-    return min(76, max(48, threshold))
+    extra   = min(16, max(0, (avg_atr - 1.5) * 4))
+    threshold = int(42 + extra)
+    return min(58, max(35, threshold))
 
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -628,7 +628,7 @@ class TradingLoop:
                 })
                 watchlist_obs[ticker] = obs_entry
 
-                if signal == "HOLD" or confidence <= 58:
+                if signal == "HOLD" or confidence <= 42:
                     logger.info(
                         "[TradingLoop][%s] %s -> HOLD | conf=%.0f%% quality=%.0f | %s",
                         cycle_id, ticker, confidence, quality, reasoning[:70],
@@ -774,6 +774,7 @@ class TradingLoop:
                         logger.info("[TradingLoop][%s] %s PropSafe WARNING — size reduced to %.0f%%",
                                     cycle_id, ticker, prop_size_mult * 100)
 
+                lot_size  = 1   # minimum lot for paper trading
                 qty       = max(lot_size, int((risk_profile.get("quantity", 1) or 1) * prop_size_mult)) or 1
                 sl_price  = obs.get("sl_price") or (live_price * 0.985)
                 tp_price  = obs.get("tp_price") or (live_price * 1.03)
