@@ -243,7 +243,42 @@ Clone trading app → Add dark/light mode, mobile responsiveness, MiroFish LangG
 - All 12 pytest tests pass (test file: /app/backend/tests/test_orderflow_zero.py)
 
 
-**Feature**: DreamerV3 LIVE TRAINING ab sirf khud evolve nahi hota — uske reward signals Robot 3.0 ke SABHI 6 layers ko train karte hain (zero blind-spots goal).
+**Feature**: Indian Stock Option Chain (Kite-style) — Full 3-Column Modal + OC Button (Jul 2026)
+
+**OC Button**: Small red circle button in ChartPanel toolbar (next to TRADE) for Indian equity stocks.
+- `data-testid="option-chain-btn"`, only visible for equity stocks (not crypto, not already an option)
+- Clicking triggers `onOpenOptionChain({ symbol, name })` → opens `OptionChainModal`
+
+**OptionChainModal.jsx** (new component — `/app/frontend/src/components/OptionChainModal.jsx`):
+- Kite-style 3-column layout: **Call Price | Strike Price | Put Price**
+- Header: stock name + spot price + BS-Derived badge + expiry dropdown selector
+- OI bars: green horizontal bars under call prices, red under put prices
+- ATM Banner: highlighted dark row with current price + "ATM" label
+- Auto-scrolls to ATM on open (150ms after data loads)
+- Click Call/Put row → `handleOptionSelect(option)` → modal closes → option chart loads
+- `data-testid="option-chain-modal"`, rows: `call-row-{strike}`, `put-row-{strike}`
+
+**Backend endpoints**:
+- `GET /api/option-chain/equity/{symbol}?expiry=` — paired chain: `{strike, call, put}` per row
+  - Primary: NSE live API (`_fetch_nse_option_chain`)
+  - Fallback: Black-Scholes with yfinance fast_info + historical vol
+  - Returns: `{chain, underlying_price, atm_strike, all_expiries, max_call_oi, max_put_oi, is_live_derived}`
+  - Cache: 90s
+- `GET /api/option/equity-intraday?underlying=&strike=&option_type=&expiry=&interval_min=` — BS-synthesized intraday candles
+  - Primary: NSE OPTSTK chart-databyindex
+  - Fallback: yfinance stock spot bars + historical vol BS synthesis
+  - Cache: 30s
+
+**TradingDashboard.jsx changes**:
+- Added `showOptionChain` state for modal
+- Modified `fetchOptionIntraday` to detect `is_equity: true` → routes to `/option/equity-intraday`
+- Modified `handleOptionSelect` to close both optionsSheet and showOptionChain modals
+- Passes `onOpenOptionChain` to ChartPanel
+
+**Tested**: 21/21 backend tests PASS, all frontend critical flows PASS (100%)
+
+
+
 
 **New file**: `/app/backend/agents/layer_evolution.py` — `LayerEvolutionEngine` singleton
 - 6 layers tracked with trust scores (EMA): dreamer, psychology, strategy, mirofish_meta, survival, risk_gate
